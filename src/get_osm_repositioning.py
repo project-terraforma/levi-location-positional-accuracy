@@ -58,8 +58,58 @@ def download_osm_data_for_point(lat, lon, buffer_m=100):
                 return None, None, None
 
 
+# ============================================================
+# Address Matching Helpers
+# ============================================================
+def parse_address_parts(address_str):
+    """
+    Parse an address string into (house_number, street_name).
+    Returns (None, None) if parsing fails.
+    """
+    import re
+    if not address_str or not isinstance(address_str, str):
+        return None, None
+    
+    # Clean up
+    s = address_str.strip().lower()
+    
+    # Extract number (starts with digits, maybe suffix like 101a or 101-b)
+    # Simple regex for leading number
+    match_num = re.match(r'^(\d+[a-z]?(?:-\d+)?)', s)
+    house_num = match_num.group(1) if match_num else None
+    
+    # Extract remainder as street name
+    street_name = s
+    if house_num:
+        street_name = s[len(house_num):].strip()
+        # Remove common separators like comma
+        street_name = street_name.strip(',- ')
+        
+    return house_num, street_name
+
+
+def compute_address_similarity(street1, street2):
+    """
+    Compute similarity score (0-100) between two street names.
+    """
+    from difflib import SequenceMatcher
+    if not street1 or not street2:
+        return 0
+    
+    # Normalize
+    s1 = str(street1).lower().replace('st', 'street').replace('ave', 'avenue').replace('rd', 'road').replace('.', '')
+    s2 = str(street2).lower().replace('st', 'street').replace('ave', 'avenue').replace('rd', 'road').replace('.', '')
+    
+    return SequenceMatcher(None, s1, s2).ratio() * 100
+
+
 def find_best_matching_building(buildings_gdf, buildings_proj, original_point_proj, address_str=None, max_distance_m=50):
-    """Find best matching building using address or distance"""
+    """
+    Find best matching building using prioritized logic:
+      1. Exact Match (House Num + Street) - Any distance (within loaded buffer)
+      2. Good Address Match (Street) - Within 50m
+      3. Nearest Building - Within 50m
+    """
     if buildings_gdf is None or len(buildings_gdf) == 0:
         return None, None, 'no_buildings'
     
@@ -67,21 +117,66 @@ def find_best_matching_building(buildings_gdf, buildings_proj, original_point_pr
     nearest_idx = distances.idxmin()
     nearest_distance = distances.min()
     
-    if nearest_distance > max_distance_m:
-        return nearest_idx, nearest_distance, 'too_far'
+    target_num, target_street = parse_address_parts(address_str)
     
-    if address_str:
-        address_lower = address_str.lower()
-        for idx in distances.nsmallest(5).index:
-            building = buildings_gdf.loc[idx]
+    best_exact_match = None         # (idx, dist)
+    best_exact_score = -1
+    best_fuzzy_match_50m = None     # (idx, dist)
+    best_fuzzy_score = -1
+    
+    # Iterate all buildings to find address matches
+    # (Checking all is cheap for typical OSM buffer sizes ~50-100 buildings)
+    for idx, row in buildings_gdf.iterrows():
+        dist = distances.loc[idx]
+        
+        # Get building address parts
+        b_num = str(row.get('addr:housenumber', '')).lower().strip()
+        b_street = str(row.get('addr:street', '')).strip()
+        if not b_street:
+            # Fallback to name or full address if structured fields missing
+            full_addr = str(row.get('addr:full', '')).strip() or str(row.get('name', '')).strip()
+            _, b_street_parsed = parse_address_parts(full_addr)
+            b_street = b_street_parsed or ''
             
-            for addr_field in ['addr:street', 'addr:housenumber', 'addr:full', 'name']:
-                if addr_field in building and pd.notna(building[addr_field]):
-                    building_addr = str(building[addr_field]).lower()
-                    if building_addr in address_lower or any(word in address_lower for word in building_addr.split()):
-                        return idx, distances.loc[idx], 'address_match'
+        # 1. Check for Exact Match (Number + Street)
+        if target_num and b_num and target_num == b_num:
+            street_score = compute_address_similarity(target_street, b_street)
+            if street_score > 80:  # High confidence
+                # If multiple exact matches, take the closer one or higher score
+                if street_score > best_exact_score:
+                    best_exact_match = (idx, dist)
+                    best_exact_score = street_score
+                elif street_score == best_exact_score:
+                    if best_exact_match and dist < best_exact_match[1]:
+                        best_exact_match = (idx, dist)
+        
+        # 2. Check for Fuzzy Match within 50m (Street only)
+        if dist <= max_distance_m and target_street and b_street:
+            street_score = compute_address_similarity(target_street, b_street)
+            if street_score > 85:  # Very good street match
+                if street_score > best_fuzzy_score:
+                    best_fuzzy_match_50m = (idx, dist)
+                    best_fuzzy_score = street_score
+                elif street_score == best_fuzzy_score:
+                    if best_fuzzy_match_50m and dist < best_fuzzy_match_50m[1]:
+                        best_fuzzy_match_50m = (idx, dist)
+
+    # --- Selection Logic ---
     
-    return nearest_idx, nearest_distance, 'distance_based'
+    # 1. Exact Match (Prioritize even if > 50m)
+    if best_exact_match:
+        return best_exact_match[0], best_exact_match[1], 'address_match_exact'
+    
+    # 2. Good Fuzzy Match (Only within max_distance)
+    if best_fuzzy_match_50m:
+        return best_fuzzy_match_50m[0], best_fuzzy_match_50m[1], 'address_match_fuzzy'
+    
+    # 3. Nearest Building (Only within max_distance)
+    if nearest_distance <= max_distance_m:
+        return nearest_idx, nearest_distance, 'distance_based'
+        
+    # 4. Give up
+    return nearest_idx, nearest_distance, 'too_far'
 
 
 def find_best_matching_streets(streets_gdf, streets_proj, building_centroid, address_str=None, top_n=3):
