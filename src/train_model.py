@@ -3,11 +3,14 @@ import numpy as np
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
 import json
+import warnings
+warnings.filterwarnings('ignore')
 
 
 # Configuration
 DATA_DIR = Path("data")
 OSM_FEATURES_CSV = DATA_DIR / "osm_features" / "osm_repositioning_features.csv"
+CONFLATED_FEATURES_CSV = DATA_DIR / "conflated_features" / "conflated_repositioning_features.csv"
 GROUND_TRUTH_CSV = DATA_DIR / "ground_truth.csv"
 MODEL_DIR = DATA_DIR / "models"
 MODEL_DIR.mkdir(exist_ok=True, parents=True)
@@ -68,16 +71,16 @@ def clamp_prediction(pred_lat, pred_lon, row, available_strategies, buffer_deg=0
     clamped_lon = np.clip(pred_lon, min_lon, max_lon)
 
     # Fallback: if still >100m from centroid, use nearest_edge
-    centroid_lat = row.get('centroid_lat')
-    centroid_lon = row.get('centroid_lon')
-    if pd.notna(centroid_lat) and pd.notna(centroid_lon):
-        dist_to_centroid = haversine_distance(clamped_lat, clamped_lon,
-                                              centroid_lat, centroid_lon)
-        if dist_to_centroid > 100:
-            ne_lat = row.get('nearest_edge_lat')
-            ne_lon = row.get('nearest_edge_lon')
-            if pd.notna(ne_lat) and pd.notna(ne_lon):
-                return ne_lat, ne_lon
+    # centroid_lat = row.get('centroid_lat')
+    # centroid_lon = row.get('centroid_lon')
+    # if pd.notna(centroid_lat) and pd.notna(centroid_lon):
+    #     dist_to_centroid = haversine_distance(clamped_lat, clamped_lon,
+    #                                           centroid_lat, centroid_lon)
+    #     if dist_to_centroid > 100:
+    #         ne_lat = row.get('nearest_edge_lat')
+    #         ne_lon = row.get('nearest_edge_lon')
+    #         if pd.notna(ne_lat) and pd.notna(ne_lon):
+    #             return ne_lat, ne_lon
 
     return clamped_lat, clamped_lon
 
@@ -96,7 +99,8 @@ def load_data():
     print("STEP 1: LOADING DATA")
     
 
-    osm_df = pd.read_csv(OSM_FEATURES_CSV)
+    # osm_df = pd.read_csv(OSM_FEATURES_CSV)
+    osm_df = pd.read_csv(CONFLATED_FEATURES_CSV)
     print(f"Matched: OSM features: {len(osm_df)} rows, {len(osm_df.columns)} columns")
 
     # Keep only matched buildings 

@@ -27,8 +27,8 @@ SEARCH_RADIUS_METERS = 100
 
 def download_osm_data_for_point(lat, lon, buffer_m=100):
     """Download buildings, streets, and parking lots"""
-    max_retries = 3
-    retry_delay = 2
+    max_retries = 1
+    retry_delay = 1
     
     for attempt in range(max_retries):
         try:
