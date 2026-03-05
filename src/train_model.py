@@ -177,6 +177,16 @@ def build_features(df):
     out['has_parking'] = out['has_parking'].astype(int)
     out['num_strategies'] = pd.to_numeric(out['num_strategies'], errors='coerce').fillna(6).astype(int)
 
+    def count_surrounding(val):
+        if pd.isna(val) or val == '':
+            return 0
+        try:
+            return len(json.loads(val))
+        except Exception:
+            return 0
+            
+    out['num_surrounding_buildings'] = out.get('surrounding_buildings', pd.Series(dtype=object)).apply(count_surrounding)
+
     # Building match method (one-hot encode the new types)
     # Types: address_match_exact, address_match_fuzzy, distance_based, etc.
     match_dummies = pd.get_dummies(out['building_match_method'], prefix='match')
@@ -267,7 +277,7 @@ def build_features(df):
     context_features = [
         'confidence', 'building_area_sqm', 'log_building_area',
         'building_distance_m', 
-        'num_streets', 'has_parking', 'num_strategies',
+        'num_streets', 'has_parking', 'num_strategies', 'num_surrounding_buildings',
         'street_1_addr_match', 'street_2_addr_match', 'street_3_addr_match',
         'any_street_addr_match',
         'street_1_distance_m', 'street_2_distance_m', 'street_3_distance_m',
