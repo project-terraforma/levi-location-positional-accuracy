@@ -8,3 +8,4 @@ mapclassify
 tabulate
 osmnx
 scikit-learn
+overturemaps

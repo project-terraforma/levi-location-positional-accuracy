@@ -51,6 +51,21 @@ def clamp_prediction(pred_lat, pred_lon, row, available_strategies, buffer_deg=0
     available anchor points (with a small buffer ~50m).  If the prediction
     is still >100m from the centroid, fall back to nearest_edge.
     """
+    # Large-building guard: if the building is >20,000 sqm (e.g. shopping mall)
+    # and the original point is already inside, don't move it at all.
+    building_area = float(row.get('building_area_sqm', 0) or 0)
+    building_wkt = row.get('building_wkt')
+    if building_area > 20000 and pd.notna(building_wkt):
+        try:
+            from shapely import wkt
+            from shapely.geometry import Point
+            orig_pt = Point(row['original_lon'], row['original_lat'])
+            poly = wkt.loads(building_wkt)
+            if poly.contains(orig_pt):
+                return row['original_lat'], row['original_lon']
+        except Exception:
+            pass
+
     # Gather anchor coords
     anchor_lats, anchor_lons = [], []
     for s in available_strategies:
@@ -70,17 +85,50 @@ def clamp_prediction(pred_lat, pred_lon, row, available_strategies, buffer_deg=0
     clamped_lat = np.clip(pred_lat, min_lat, max_lat)
     clamped_lon = np.clip(pred_lon, min_lon, max_lon)
 
-    # Fallback: if still >100m from centroid, use nearest_edge
-    # centroid_lat = row.get('centroid_lat')
-    # centroid_lon = row.get('centroid_lon')
-    # if pd.notna(centroid_lat) and pd.notna(centroid_lon):
-    #     dist_to_centroid = haversine_distance(clamped_lat, clamped_lon,
-    #                                           centroid_lat, centroid_lon)
-    #     if dist_to_centroid > 100:
-    #         ne_lat = row.get('nearest_edge_lat')
-    #         ne_lon = row.get('nearest_edge_lon')
-    #         if pd.notna(ne_lat) and pd.notna(ne_lon):
-    #             return ne_lat, ne_lon
+    category_type = row.get('category_type', 'other')
+    is_outdoor = (category_type == 'outdoor')
+    is_storage = (category_type == 'self_storage_facility')
+    building_wkt = row.get('building_wkt')
+    
+    if not is_outdoor and not is_storage and pd.notna(building_wkt):
+        try:
+            from shapely import wkt
+            from shapely.geometry import Point
+            from shapely.ops import nearest_points
+            
+            poly = wkt.loads(building_wkt)
+            pred_pt = Point(clamped_lon, clamped_lat)
+            
+            # nearest_points returns the nearest point on the polygon to pred_pt.
+            # If pred_pt is already inside the polygon, it remains unchanged.
+            pt_on_poly, _ = nearest_points(poly, pred_pt)
+            clamped_lon, clamped_lat = pt_on_poly.x, pt_on_poly.y
+            
+            # Nudge points on the boundary inward perpendicular to the edge
+            snapped_pt = Point(clamped_lon, clamped_lat)
+            if poly.boundary.distance(snapped_pt) < 1e-8:
+                boundary = poly.boundary
+                proj_dist = boundary.project(snapped_pt)
+                eps = 0.01
+                p1 = boundary.interpolate(max(0, proj_dist - eps))
+                p2 = boundary.interpolate(min(boundary.length, proj_dist + eps))
+                tx, ty = p2.x - p1.x, p2.y - p1.y
+                centroid = poly.centroid
+                dx_c = centroid.x - clamped_lon
+                dy_c = centroid.y - clamped_lat
+                if ty * dx_c + (-tx) * dy_c > 0:
+                    nx, ny = ty, -tx
+                else:
+                    nx, ny = -ty, tx
+                length = (nx**2 + ny**2)**0.5
+                if length > 0:
+                    nx, ny = nx / length, ny / length
+                    # Move inward by 25% of building depth along this normal
+                    depth = abs(dx_c * nx + dy_c * ny)
+                    clamped_lon += 0.25 * depth * nx
+                    clamped_lat += 0.25 * depth * ny
+        except Exception:
+            pass
 
     return clamped_lat, clamped_lon
 
@@ -175,7 +223,9 @@ def build_features(df):
         'shopping_center': 'retail', 'discount_store': 'retail',
         'professional_services': 'services', 'lawyer': 'services',
         'construction_services': 'services', 'marketing_agency': 'services',
-        'campground': 'outdoor', 'rv_park': 'outdoor',
+        'campground': 'outdoor', 'rv_park': 'outdoor', 'park': 'outdoor',
+        'farmers_market': 'outdoor', 'plaza': 'outdoor', 'dog_park': 'outdoor',
+        'national_park': 'outdoor',
         'self_storage_facility': 'storage', 'storage_facility': 'storage',
     }
     out['category_type'] = out['primary_category'].map(category_type_map).fillna('other')
@@ -488,201 +538,15 @@ def train_direct_regressor(df, all_features, available_strategies, context_featu
     }
 
 
-# Step 5: Train Blend-Weight Model
-def train_blend_model(df, context_features, available_strategies):
-    """
-    For each location, find the optimal blend weights over available strategy
-    anchor points, then train a model to predict those weights from context.
-
-    Uses softmax normalization to keep weights valid, and clamps the final
-    blended point to the anchor bounding box.
-    """
-    print("STEP 5: TRAINING BLEND-WEIGHT MODEL (with clamping)")
-
-    try:
-        from sklearn.ensemble import GradientBoostingRegressor
-        from sklearn.model_selection import KFold
-        from sklearn.multioutput import MultiOutputRegressor
-        from scipy.optimize import minimize
-        import joblib
-    except ImportError:
-        print("  Warning: Missing dependencies. pip install scikit-learn scipy")
-        return None, None
-
-    # --- Step 5a: Find optimal blend weights per location ---
-    print("  Finding optimal blend weights per location...")
-
-    # Train on all data
-    records = []
-    for idx, row in df.iterrows():
-        gt_lat = row['gt_latitude']
-        gt_lon = row['gt_longitude']
-
-        # Collect available anchor coords for this location
-        anchors = []
-        for s in available_strategies:
-            lat_c, lon_c = f'{s}_lat', f'{s}_lon'
-            if pd.notna(row.get(lat_c)) and pd.notna(row.get(lon_c)):
-                anchors.append((s, row[lat_c], row[lon_c]))
-
-        if len(anchors) < 2:
-            continue
-
-        names = [a[0] for a in anchors]
-        lats = np.array([a[1] for a in anchors])
-        lons = np.array([a[2] for a in anchors])
-        n = len(anchors)
-
-        # Optimise: find weights that minimise distance to ground truth
-        def objective(w):
-            w_norm = np.exp(w) / np.sum(np.exp(w))  # softmax
-            blend_lat = np.dot(lats, w_norm)
-            blend_lon = np.dot(lons, w_norm)
-            return haversine_distance(blend_lat, blend_lon, gt_lat, gt_lon)
-
-        # Multiple random restarts
-        best_result = None
-        for _ in range(5):
-            w0 = np.random.randn(n) * 0.1
-            result = minimize(objective, w0, method='Nelder-Mead',
-                              options={'maxiter': 500, 'xatol': 1e-8})
-            if best_result is None or result.fun < best_result.fun:
-                best_result = result
-
-        w_opt = np.exp(best_result.x) / np.sum(np.exp(best_result.x))
-        blend_dist = best_result.fun
-
-        # Store as fixed-length weight vector (pad with 0 for missing strategies)
-        record = {'id': row['id'], 'blend_dist': blend_dist}
-        for si, s in enumerate(available_strategies):
-            if s in names:
-                record[f'w_{s}'] = w_opt[names.index(s)]
-            else:
-                record[f'w_{s}'] = 0.0
-        records.append(record)
-
-    weights_df = pd.DataFrame(records)
-    print(f"Matched: Optimal blend weights computed for {len(weights_df)} locations")
-    print(f"    Oracle blend mean distance: {weights_df['blend_dist'].mean():.2f}m")
-
-    # Merge weights back
-    df = df.merge(weights_df[['id', 'blend_dist'] +
-                             [f'w_{s}' for s in available_strategies]],
-                  on='id', how='inner')
-
-    # --- Step 5b: Train model to predict weights from context ---
-    weight_cols = [f'w_{s}' for s in available_strategies]
-
-    X = df[context_features].values
-    y = df[weight_cols].values
-
-    print(f"\n  Training blend model: {X.shape[0]} samples × {X.shape[1]} features → {y.shape[1]} weights")
-
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    cv_dists = []
-    fold_means = []
-
-    for fold, (train_idx, test_idx) in enumerate(kf.split(X), 1):
-        X_tr, X_te = X[train_idx], X[test_idx]
-        y_tr, y_te = y[train_idx], y[test_idx]
-
-        reg = MultiOutputRegressor(GradientBoostingRegressor(
-            n_estimators=200, max_depth=4, learning_rate=0.05,
-            loss='huber', alpha=0.9,
-            min_samples_split=5, min_samples_leaf=3,
-            subsample=0.8, random_state=42
-        ))
-        reg.fit(X_tr, y_tr)
-        w_pred = reg.predict(X_te)
-
-        fold_dists = []
-        for i in range(len(test_idx)):
-            row = df.iloc[test_idx[i]]
-
-            # Apply softmax to predicted weights (guarantees positive + sum-to-1)
-            wp_raw = w_pred[i]
-            wp = np.exp(wp_raw) / np.sum(np.exp(wp_raw))
-
-            # Blend the anchor coordinates (only using available ones)
-            blend_lat = 0.0
-            blend_lon = 0.0
-            total_w = 0.0
-            for si, s in enumerate(available_strategies):
-                lat_c = f'{s}_lat'
-                lon_c = f'{s}_lon'
-                if pd.notna(row.get(lat_c)) and pd.notna(row.get(lon_c)):
-                    blend_lat += wp[si] * row[lat_c]
-                    blend_lon += wp[si] * row[lon_c]
-                    total_w += wp[si]
-
-            # Re-normalise if some strategies were missing
-            if total_w > 0 and total_w != 1.0:
-                blend_lat /= total_w
-                blend_lon /= total_w
-
-            # Clamp to anchor bounding box + fallback
-            blend_lat, blend_lon = clamp_prediction(
-                blend_lat, blend_lon, row, available_strategies
-            )
-
-            d = haversine_distance(blend_lat, blend_lon,
-                                   row['gt_latitude'], row['gt_longitude'])
-            fold_dists.append(d)
-            cv_dists.append(d)
-
-        fold_means.append(np.mean(fold_dists))
-        print(f"    Fold {fold}: mean={np.mean(fold_dists):.2f}m  median={np.median(fold_dists):.2f}m")
-
-    print(f"\n  Cross-validated Blend Model (CLAMPED):")
-    print(f"    Mean distance to GT:         {np.mean(cv_dists):.2f}m")
-    print(f"    Median distance to GT:       {np.median(cv_dists):.2f}m")
-    print(f"    Trimmed mean (drop top 5%):  {trimmed_mean(cv_dists):.2f}m")
-
-    # Train final model
-    final_reg = MultiOutputRegressor(GradientBoostingRegressor(
-        n_estimators=200, max_depth=4, learning_rate=0.05,
-        loss='huber', alpha=0.9,
-        min_samples_split=5, min_samples_leaf=3,
-        subsample=0.8, random_state=42
-    ))
-    final_reg.fit(X, y)
-
-    # Average predicted weights (to see which anchors the model prefers)
-    w_all_pred = final_reg.predict(X)
-    # Apply softmax row-wise
-    w_all_pred = np.exp(w_all_pred) / np.exp(w_all_pred).sum(axis=1, keepdims=True)
-    mean_weights = w_all_pred.mean(axis=0)
-
-    print(f"\n  Average predicted blend weights:")
-    for si, s in enumerate(available_strategies):
-        bar = "█" * int(mean_weights[si] * 50)
-        print(f"    {s:20s}: {mean_weights[si]:.3f}  {bar}")
-
-    # Save
-    model_path = MODEL_DIR / "blend_model.joblib"
-    joblib.dump({
-        'model': final_reg,
-        'context_features': context_features,
-        'available_strategies': available_strategies,
-        'cv_mean_dist': np.mean(cv_dists),
-        'cv_median_dist': np.median(cv_dists),
-        'cv_trimmed_mean': trimmed_mean(cv_dists),
-    }, model_path)
-    print(f"\nMatched: Model saved to: {model_path}")
-
-    return final_reg, np.mean(cv_dists)
-
-
-# Step 6: Final Comparison
-def print_final_comparison(baseline_results, direct_cv, blend_cv):
+# Step 5: Final Comparison
+def print_final_comparison(baseline_results, direct_cv):
     """Print a clean comparison of all methods."""
     print("  FINAL COMPARISON — Mean Distance to Ground Truth")
 
     all_results = dict(baseline_results)
     if direct_cv is not None:
         all_results['ML_direct_regressor'] = direct_cv
-    if blend_cv is not None:
-        all_results['ML_blend_weights'] = blend_cv
+
 
     print(f"\n  {'Method':<35s} {'Distance':>10s} {'Improvement':>12s}")
     print(f"  {'─'*35} {'─'*10} {'─'*12}")
@@ -701,16 +565,14 @@ def print_final_comparison(baseline_results, direct_cv, blend_cv):
         print(f"  {method:<35s} {dist:>8.2f}m  {sign}{abs(delta):>8.2f}m{tag}")
 
     # ML improvement summary
-    if direct_cv and blend_cv:
-        better = min(direct_cv, blend_cv)
-        better_name = 'Direct Regressor' if direct_cv <= blend_cv else 'Blend Weights'
-        imp = orig - better
+    if direct_cv:
+        imp = orig - direct_cv
         pct = imp / orig * 100 if orig > 0 else 0
-        print(f"\n  ★ Best ML model: {better_name}")
+        print(f"\n  ★ ML Direct Regressor")
         print(f"    Improvement over original: {imp:.2f}m ({pct:.1f}%)")
         ne = all_results.get('always_nearest_edge', orig)
-        if better < ne:
-            print(f"    Also beats 'always nearest-edge' by {ne - better:.2f}m")
+        if direct_cv < ne:
+            print(f"    Also beats 'always nearest-edge' by {ne - direct_cv:.2f}m")
     
 
 # Main Pipeline
@@ -736,13 +598,8 @@ def main():
         for col, vals in direct_preds.items():
             featured_df[col] = vals
 
-    # 5. Blend-weight model (context → anchor weights)
-    blend_reg, blend_cv = train_blend_model(
-        featured_df, context_features, available_strategies
-    )
-
-    # 6. Final comparison
-    print_final_comparison(baseline_results, direct_cv, blend_cv)
+    # 5. Final comparison
+    print_final_comparison(baseline_results, direct_cv)
 
     # Save metadata
     meta = {
@@ -752,7 +609,7 @@ def main():
         'n_training_samples': len(featured_df),
         'baseline_results': {k: float(v) for k, v in baseline_results.items()},
         'ml_direct_cv_mean': float(direct_cv) if direct_cv else None,
-        'ml_blend_cv_mean': float(blend_cv) if blend_cv else None,
+
     }
     with open(MODEL_DIR / "model_info.json", 'w') as f:
         json.dump(meta, f, indent=2)
@@ -771,7 +628,6 @@ def main():
     
     print(f"\n  Outputs in {MODEL_DIR}/:")
     print(f"    ├── direct_regressor.joblib    (context+anchors → lat/lon)")
-    print(f"    ├── blend_model.joblib         (context → anchor weights)")
     print(f"    ├── labeled_training_data.csv   (training data)")
     print(f"    └── model_info.json            (features & results)")
     

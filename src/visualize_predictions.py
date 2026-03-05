@@ -327,10 +327,12 @@ def main():
         name = row.get('place_name', 'Unknown')
         category = row.get('primary_category', '')
         imp = row['improvement_m']
+        pred_err = row['pred_error_m']
         
         color = '#e53935' if imp < 0 else '#00c853'
         symbol = '↑' if imp < 0 else '↓'
         bg = '#fbe9e7' if imp < 0 else '#e8f5e9'
+        err_color = get_error_color(pred_err)
         
         sidebar_items += f'''
         <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: {bg}; cursor: pointer;"
@@ -341,8 +343,9 @@ def main():
                 <span>{category[:20]}</span>
                 <span style="font-weight: bold; color: {color};">{symbol}{abs(imp):.1f}m</span>
             </div>
-            <div style="font-size: 9px; color: #999; margin-top: 3px; font-family: monospace;">
-                {lat:.5f}, {lon:.5f}
+            <div style="font-size: 10px; margin-top: 3px; display: flex; justify-content: space-between;">
+                <span style="color: {err_color}; font-weight: bold;">⊕ {pred_err:.1f}m from GT</span>
+                <span style="font-size: 9px; color: #999; font-family: monospace;">{lat:.5f}, {lon:.5f}</span>
             </div>
         </div>
         '''

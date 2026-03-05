@@ -2,7 +2,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely import wkb
 import os
-import numpy as np
+
 
 def load_data(filepath):
     """
