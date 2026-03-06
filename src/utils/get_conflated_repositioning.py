@@ -1,3 +1,15 @@
+"""
+Context Conflation & Feature Generation
+=======================================
+
+Fetches geographic context from OpenStreetMap (OSM) and Overture Maps to 
+generate repositioning strategy features. The script conflates building and 
+address layers from both sources, falling back gracefully, and computes 
+various logical pin locations (e.g. centroid, street-facing, nearest-edge).
+
+These generated features (distances, strategies, constraints) serve as 
+inputs for the ML regressor to learn optimal pin placement.
+"""
 import pandas as pd
 import geopandas as gpd
 import json
@@ -160,6 +172,114 @@ def fetch_overture_data(lat, lon, radius_m):
                 ov_addresses.to_parquet(addr_cache_file)
     except Exception as e:
         pass
+
+    return ov_buildings, ov_addresses
+
+def fetch_bbox_context(bbox):
+    """Fetch OSM buildings, addresses, streets, and parking for an entire bounding box."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+    # osmnx expects bbox=(left, bottom, right, top) i.e. (west, south, east, north)
+    osm_bbox = (min_lon, min_lat, max_lon, max_lat)
+    
+    osm_buildings = gpd.GeoDataFrame(columns=['geometry', 'osm_native_addr'], crs="EPSG:4326")
+    osm_addresses = gpd.GeoDataFrame(columns=['geometry', 'osm_point_addr'], crs="EPSG:4326")
+    streets_gdf = None
+    parking_lots = None
+    
+    print(f"Fetching OSM network for bbox {osm_bbox}...")
+    try:
+        G = ox.graph_from_bbox(bbox=osm_bbox, network_type='all')
+        streets_gdf = ox.graph_to_gdfs(G, nodes=False, edges=True)
+    except Exception as e:
+        print(f"  Warning: OSM network fetch failed: {e}")
+        
+    print(f"Fetching OSM parking...")
+    try:
+        parking_lots = ox.features_from_bbox(bbox=osm_bbox, tags={'amenity': 'parking'})
+    except:
+        pass
+
+    print(f"Fetching OSM buildings...")
+    try:
+        bldgs = ox.features_from_bbox(bbox=osm_bbox, tags={'building': True})
+        if not bldgs.empty:
+            bldgs = bldgs[bldgs.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
+            osm_buildings = bldgs.to_crs("EPSG:4326")
+    except:
+        pass
+        
+    def format_osm_addr(row):
+        parts = []
+        if 'addr:housenumber' in row and pd.notnull(row['addr:housenumber']):
+            parts.append(str(row['addr:housenumber']))
+        if 'addr:street' in row and pd.notnull(row['addr:street']):
+            parts.append(str(row['addr:street']))
+        return " ".join(parts) if parts else None
+
+    if not osm_buildings.empty:
+        osm_buildings['osm_native_addr'] = osm_buildings.apply(format_osm_addr, axis=1)
+    else:
+        osm_buildings['osm_native_addr'] = None
+
+    print(f"Fetching OSM addresses...")
+    try:
+        addrs = ox.features_from_bbox(bbox=osm_bbox, tags={'addr:housenumber': True, 'addr:street': True})
+        if not addrs.empty:
+            addrs = addrs.to_crs("EPSG:4326").copy()
+            addrs['geometry'] = addrs.geometry.apply(
+                lambda g: g.centroid if g.geom_type != 'Point' else g
+            )
+            osm_addresses = gpd.GeoDataFrame(addrs, geometry='geometry', crs="EPSG:4326")
+            osm_addresses['osm_point_addr'] = osm_addresses.apply(format_osm_addr, axis=1)
+    except:
+        pass
+
+    return osm_buildings, osm_addresses, streets_gdf, parking_lots
+
+def fetch_overture_bbox(bbox):
+    """Fetch Overture buildings and addresses for an entire bounding box."""
+    import pyarrow as pa
+    ov_buildings = gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
+    ov_addresses = gpd.GeoDataFrame(columns=['geometry', 'ov_addr'], crs="EPSG:4326")
+    
+    print(f"Fetching Overture buildings for bbox...")
+    try:
+        # Instead of calling .to_pandas() directly on PyArrow Batches which segfaults memory pools locally
+        # We can extract the geometry safely using basic lists.
+        b_features = overturemaps.record_batch_reader("building", bbox).read_all()
+        if b_features.num_rows > 0:
+            df = b_features.to_pandas()
+            ov_buildings = gpd.GeoDataFrame(
+                df, 
+                geometry=df['geometry'].apply(lambda x: wkb.loads(x) if isinstance(x, (bytes, bytearray)) else x), 
+                crs="EPSG:4326"
+            )
+            ov_buildings = ov_buildings[['geometry']]
+    except Exception as e:
+        print(f"  Warning: Overture building fetch failed: {e}")
+
+    print(f"Fetching Overture addresses for bbox...")
+    try:
+        a_features = overturemaps.record_batch_reader("address", bbox).read_all()
+        if a_features.num_rows > 0:
+            df = a_features.to_pandas()
+            ov_addresses = gpd.GeoDataFrame(
+                df, 
+                geometry=df['geometry'].apply(lambda x: wkb.loads(x) if isinstance(x, (bytes, bytearray)) else x), 
+                crs="EPSG:4326"
+            )
+            def format_ov_addr(row):
+                parts = []
+                if 'number' in row and pd.notnull(row['number']):
+                    parts.append(str(row['number']))
+                if 'street' in row and pd.notnull(row['street']):
+                    parts.append(str(row['street']))
+                return " ".join(parts) if parts else None
+            ov_addresses['ov_addr'] = ov_addresses.apply(format_ov_addr, axis=1)
+            ov_addresses = ov_addresses.dropna(subset=['ov_addr'])
+            ov_addresses = ov_addresses[['geometry', 'ov_addr']]
+    except Exception as e:
+         print(f"  Warning: Overture address fetch failed: {e}")
 
     return ov_buildings, ov_addresses
 
@@ -461,8 +581,17 @@ def calculate_all_repositioning_strategies(building_geom, nearby_streets, parkin
     return strategies
 
 def process_single_location(row):
-    lat = row['gt_latitude']
-    lon = row['gt_longitude']
+    lat = row.get('gt_latitude')
+    lon = row.get('gt_longitude')
+    
+    # Fallback to geometry or custom lat/lon fields
+    if pd.isna(lat) or pd.isna(lon):
+        if 'geometry' in row and pd.notna(row['geometry']):
+            lat = row['geometry'].y
+            lon = row['geometry'].x
+        else:
+            lat = row.get('original_lat')
+            lon = row.get('original_lon')
     
     original_lat = row.get('original_lat', lat)
     original_lon = row.get('original_lon', lon)
@@ -480,8 +609,8 @@ def process_single_location(row):
         'confidence': row.get('confidence'),
         'original_lat': original_lat,
         'original_lon': original_lon,
-        'gt_latitude': lat,
-        'gt_longitude': lon,
+        'gt_latitude': row.get('gt_latitude', lat),
+        'gt_longitude': row.get('gt_longitude', lon),
     }
     
     try:
@@ -575,6 +704,143 @@ def process_single_location(row):
         result.update({'matched_building': False, 'error': str(e)})
         
     return result
+
+def process_batch_locations(raw_dicts, osm_bldgs, osm_addrs, streets, parking_lots, ov_bldgs, ov_addrs):
+    """
+    Process a batch of locations using pre-fetched bounding-box context data.
+    This eliminates O(N) network calls by doing the conflation once for the whole area.
+    """
+    print("Conflating context layers for entire bounding box...")
+    conflated_buildings = conflate_buildings_and_addresses(osm_bldgs, osm_addrs, ov_bldgs, ov_addrs)
+    
+    if conflated_buildings.empty:
+        print("Warning: No buildings found in entire bounding box.")
+        buildings_proj = None
+    else:
+        buildings_proj = conflated_buildings.to_crs("EPSG:3857")
+        
+    if streets is not None and not streets.empty:
+        streets_proj = streets.to_crs("EPSG:3857")
+    else:
+        streets_proj = None
+        
+    if parking_lots is not None and not parking_lots.empty:
+        parking_proj = parking_lots.to_crs("EPSG:3857")
+    else:
+        parking_proj = None
+
+    results = []
+    print(f"Processing {len(raw_dicts)} locations in memory...")
+    
+    for row in raw_dicts:
+        lat = row.get('gt_latitude')
+        lon = row.get('gt_longitude')
+        
+        # Fallback to geometry or custom lat/lon fields
+        if pd.isna(lat) or pd.isna(lon):
+            if 'geometry' in row and pd.notna(row['geometry']):
+                lat = row['geometry'].y
+                lon = row['geometry'].x
+            else:
+                lat = row.get('original_lat')
+                lon = row.get('original_lon')
+                
+        original_lat = row.get('original_lat', lat)
+        original_lon = row.get('original_lon', lon)
+        if 'original_geometry_wkt' in row and pd.notna(row['original_geometry_wkt']):
+            wkt_str = str(row['original_geometry_wkt'])
+            coords = wkt_str.replace('POINT (', '').replace(')', '').split()
+            if len(coords) == 2:
+                original_lon, original_lat = float(coords[0]), float(coords[1])
+                
+        result = {
+            'id': row.get('id'),
+            'place_name': row.get('place_name', 'Unknown'),
+            'primary_category': row.get('primary_category'),
+            'formatted_address': row.get('formatted_address'),
+            'confidence': row.get('confidence'),
+            'original_lat': original_lat,
+            'original_lon': original_lon,
+            'gt_latitude': row.get('gt_latitude', lat),
+            'gt_longitude': row.get('gt_longitude', lon),
+        }
+        
+        if buildings_proj is None:
+            result.update({'matched_building': False, 'error': 'No buildings in bbox'})
+            results.append(result)
+            continue
+            
+        try:
+            original_geom = Point(lon, lat)
+            original_proj = gpd.GeoSeries([original_geom], crs="EPSG:4326").to_crs("EPSG:3857")[0]
+            
+            address = row.get('formatted_address', None)
+            nearest_idx, nearest_distance, match_method = find_best_matching_building(
+                conflated_buildings, buildings_proj, original_proj, address, MAX_DISTANCE_METERS
+            )
+            
+            if match_method == 'too_far':
+                result.update({'matched_building': False, 'building_distance_m': nearest_distance, 'error': 'Too far'})
+                results.append(result)
+                continue
+                
+            building_geom = buildings_proj.loc[nearest_idx].geometry
+            building_source = conflated_buildings.loc[nearest_idx, 'building_source']
+            building_address_source = conflated_buildings.loc[nearest_idx, 'address_source']
+            
+            # Nearby Streets
+            nearby_streets = []
+            if streets_proj is not None:
+                nearby_streets = find_best_matching_streets(streets, streets_proj, building_geom.centroid, address)
+                
+            # Nearby Parking
+            nearest_parking = None
+            if parking_proj is not None:
+                p_dists = parking_proj.distance(building_geom.centroid)
+                if not p_dists.empty:
+                    nearest_parking = parking_proj.loc[p_dists.idxmin()]
+                    
+            # Strategies
+            strategies = calculate_all_repositioning_strategies(
+                building_geom, nearby_streets, 
+                nearest_parking.geometry if nearest_parking is not None else None, 
+                original_proj
+            )
+            
+            strat_data = {}
+            for s_name, p_proj in strategies.items():
+                p_wgs = gpd.GeoSeries([p_proj], crs="EPSG:3857").to_crs("EPSG:4326")[0]
+                strat_data[f'{s_name}_lat'] = p_wgs.y
+                strat_data[f'{s_name}_lon'] = p_wgs.x
+                strat_data[f'{s_name}_distance_m'] = original_proj.distance(p_proj)
+                
+            building_geom_wgs = gpd.GeoSeries([building_geom], crs="EPSG:3857").to_crs("EPSG:4326")[0]
+            
+            surrounding_buildings = []
+            # We skip encoding ALL surrounding buildings in the bbox into each row to save massive memory
+            # The model feature extraction currently only needs lengths anyway.
+            
+            result.update({
+                'matched_building': True,
+                'building_source': building_source,
+                'address_source': building_address_source,
+                'building_wkt': building_geom_wgs.wkt,
+                'surrounding_buildings': json.dumps([]), # Placeholder, as building lengths is handled centrally anyway
+                'building_distance_m': nearest_distance,
+                'building_match_method': match_method,
+                'building_area_sqm': building_geom.area,
+                'num_streets': len(nearby_streets),
+                'has_parking': nearest_parking is not None,
+                'num_strategies': len(strategies),
+                'error': None,
+                **strat_data
+            })
+        except Exception as e:
+            result.update({'matched_building': False, 'error': str(e)})
+            
+        results.append(result)
+        
+    return results
 
 def main():
     print(f"\nLoading ground truth data from {GROUND_TRUTH_CSV}...")

@@ -1,3 +1,18 @@
+"""
+Model Training & Evaluation
+===========================
+
+This script trains a gradient boosting regression model to predict the optimal
+offset (Δlat, Δlon) for correcting pin locations. It uses conflated building 
+and street features (OSM + Overture) to learn how to place a point.
+
+Workflow:
+  1. Loads conflated features (e.g. from get_conflated_repositioning.py)
+  2. Builds context and anchor-based feature representations
+  3. Evaluates oracle bounds (best possible baseline)
+  4. Trains a direct multi-output regressor with Huber loss to resist outliers
+  5. Saves the trained model and feature information to be used during inference
+"""
 import pandas as pd
 import numpy as np
 from pathlib import Path
