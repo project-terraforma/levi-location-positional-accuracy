@@ -65,17 +65,6 @@ def generate_pipeline_map(df, output_path):
         
         # Draw ML line if predicted
         if pd.notna(pred_lat) and pd.notna(pred_lon):
-            folium.Marker(
-                location=[pred_lat, pred_lon],
-                icon=folium.Icon(color='blue', icon='star'),
-                popup=f"Predicted ML:<br>{popup_html}"
-            ).add_to(fg_pred)
-            
-            folium.PolyLine(
-                locations=[[orig_lat, orig_lon], [pred_lat, pred_lon]],
-                color='blue', weight=2, dash_array='5', opacity=0.6
-            ).add_to(fg_pred)
-            
             # Draw Alignment string if aligned
             if row.get('was_aligned') and pd.notna(align_lat):
                 folium.Marker(
@@ -85,9 +74,20 @@ def generate_pipeline_map(df, output_path):
                 ).add_to(fg_align)
                 
                 folium.PolyLine(
-                    locations=[[pred_lat, pred_lon], [align_lat, align_lon]],
+                    locations=[[orig_lat, orig_lon], [align_lat, align_lon]],
                     color='green', weight=3, opacity=0.8
                 ).add_to(fg_align)
+            else:
+                folium.Marker(
+                    location=[pred_lat, pred_lon],
+                    icon=folium.Icon(color='blue', icon='star'),
+                    popup=f"Predicted ML:<br>{popup_html}"
+                ).add_to(fg_pred)
+                
+                folium.PolyLine(
+                    locations=[[orig_lat, orig_lon], [pred_lat, pred_lon]],
+                    color='blue', weight=2, dash_array='5', opacity=0.6
+                ).add_to(fg_pred)
 
     fg_orig.add_to(m)
     fg_pred.add_to(m)
