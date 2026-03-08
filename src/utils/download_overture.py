@@ -9,7 +9,7 @@ Data is converted to a GeoDataFrame and can be exported as GeoJSON, Parquet,
 or CSV for downstream processing in the pipeline.
 
 Usage:
-    python src/download_overture.py --min_lon -122.34 --min_lat 47.62 --max_lon -122.32 --max_lat 47.64 
+    python src/utils/download_overture.py --min_lon -122.34 --min_lat 47.62 --max_lon -122.32 --max_lat 47.64 
 """
 import overturemaps
 import geopandas as gpd

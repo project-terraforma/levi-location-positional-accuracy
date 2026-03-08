@@ -255,7 +255,7 @@ print("\nCreating visualization map...")
 m = folium.Map(
     location=[TEST_LOCATION['original_lat'], TEST_LOCATION['original_lon']],
     zoom_start=19,
-    tiles='OpenStreetMap'
+    tiles='CartoDB positron'
 )
 
 # Add building
@@ -303,11 +303,11 @@ folium.Marker(
     tooltip="Original (Incorrect)"
 ).add_to(m)
 
-# Add ground truth (GREEN)
+# Add ground truth (BLUE)
 folium.Marker(
     location=[TEST_LOCATION['gt_lat'], TEST_LOCATION['gt_lon']],
     popup="<b>Ground Truth</b><br>(Manually Labeled)",
-    icon=folium.Icon(color='green', icon='check'),
+    icon=folium.Icon(color='blue', icon='check'),
     tooltip="Ground Truth (Correct)"
 ).add_to(m)
 
@@ -364,22 +364,24 @@ print(f"\n🏆 Best strategy: {best_strategy} ({best_distance:.2f}m from ground 
 # Add legend
 legend_html = f'''
 <div style="position: fixed; top: 10px; right: 10px; width: 250px; 
-     background-color: white; border:2px solid grey; z-index:9999; 
-     font-size:11px; padding: 10px">
-     <p style="margin:0; font-weight:bold;">{TEST_LOCATION['place_name']}</p>
-     <p style="margin:2px; font-size:10px;">{TEST_LOCATION['address']}</p>
-     <hr style="margin:5px 0;">
-     <p style="margin:2px;"><span style="color:red;">✖</span> Original (Incorrect)</p>
-     <p style="margin:2px;"><span style="color:green;">✔</span> Ground Truth (Correct)</p>
-     <hr style="margin:5px 0;">
-     <p style="margin:2px; font-weight:bold; font-size:10px;">Strategies:</p>
-     <p style="margin:2px;"><span style="color:blue;">●</span> Centroid</p>
-     <p style="margin:2px;"><span style="color:purple;">●</span> Street 1-3</p>
-     <p style="margin:2px;"><span style="color:orange;">●</span> Parking</p>
-     <p style="margin:2px;"><span style="color:pink;">●</span> Cardinal Edges</p>
-     <hr style="margin:5px 0;">
-     <p style="margin:2px; font-size:10px;"><b>Best:</b> {best_strategy}</p>
-     <p style="margin:2px; font-size:10px;"><b>Error:</b> {best_distance:.2f}m</p>
+     background: white; border: 2px solid #666; z-index: 9999;
+     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+     font-size: 12px; padding: 14px; border-radius: 8px;
+     box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+     <h3 style="margin:0 0 4px 0; font-size:14px; color:#333;">{TEST_LOCATION['place_name']}</h3>
+     <p style="margin:0; font-size:10px; color: #666;">{TEST_LOCATION['address']}</p>
+     <hr style="margin:8px 0; border:0; border-top:1px solid #ddd;">
+     <p style="margin:2px;"><span style="color:#e53935;">✖</span> Original (Incorrect)</p>
+     <p style="margin:2px;"><span style="color:#1e88e5;">✔</span> Ground Truth (Correct)</p>
+     <hr style="margin:8px 0; border:0; border-top:1px solid #ddd;">
+     <p style="margin:2px 0 4px 0; font-weight:bold; font-size:11px; color:#666;">Strategies:</p>
+     <p style="margin:2px; font-size: 11px;"><span style="color:blue;">●</span> Centroid</p>
+     <p style="margin:2px; font-size: 11px;"><span style="color:purple;">●</span> Street 1-3</p>
+     <p style="margin:2px; font-size: 11px;"><span style="color:orange;">●</span> Parking</p>
+     <p style="margin:2px; font-size: 11px;"><span style="color:pink;">●</span> Cardinal Edges</p>
+     <hr style="margin:8px 0; border:0; border-top:1px solid #ddd;">
+     <p style="margin:2px; font-size:11px;"><b>Best Strategy:</b> {best_strategy}</p>
+     <p style="margin:2px; font-size:11px;"><b>Error distance:</b> {best_distance:.2f}m</p>
 </div>
 '''
 m.get_root().html.add_child(folium.Element(legend_html))

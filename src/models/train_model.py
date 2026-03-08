@@ -162,7 +162,7 @@ def load_data():
     print("STEP 1: LOADING DATA")
     
 
-    # osm_df = pd.read_csv(OSM_FEATURES_CSV)
+    #osm_df = pd.read_csv(OSM_FEATURES_CSV)
     osm_df = pd.read_csv(CONFLATED_FEATURES_CSV)
     print(f"Matched: OSM features: {len(osm_df)} rows, {len(osm_df.columns)} columns")
 

@@ -114,7 +114,7 @@ def main():
     fg_original = folium.FeatureGroup(name="Original Positions (red)", show=False)
     fg_predicted_improved = folium.FeatureGroup(name="ML Predictions (Improved, blue)", show=True)
     fg_predicted_worsened = folium.FeatureGroup(name="ML Predictions (Worsened, blue)", show=False)
-    fg_ground_truth = folium.FeatureGroup(name="Ground Truth (green)", show=False)
+    fg_ground_truth = folium.FeatureGroup(name="Ground Truth (blue)", show=False)
     fg_improved = folium.FeatureGroup(name="Improved (green arrows)", show=True)
     fg_worsened = folium.FeatureGroup(name="Worsened (red arrows)", show=True)
 
@@ -213,7 +213,7 @@ def main():
         # --- Ground truth (green, small) ---
         folium.CircleMarker(
             location=[gt_lat, gt_lon],
-            radius=3, color='#00c853', fill=True, fillColor='#00c853',
+            radius=3, color='#1e88e5', fill=True, fillColor='#1e88e5',
             fillOpacity=0.5, weight=1,
             tooltip=f"GT: {name[:25]}"
         ).add_to(fg_ground_truth)
@@ -308,7 +308,7 @@ def main():
               font-size: 10px; color: #999;">
             <span style="color: #e53935;">●</span> Original &nbsp;
             <span style="color: #1e88e5;">●</span> ML Predicted &nbsp;
-            <span style="color: #00c853;">●</span> Ground Truth<br>
+            <span style="color: #1e88e5;">●</span> Ground Truth<br>
             Arrow color = improvement (green) or regression (red)
          </div>
     </div>

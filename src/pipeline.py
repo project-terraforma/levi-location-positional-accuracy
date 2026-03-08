@@ -41,7 +41,7 @@ def generate_pipeline_map(df, output_path):
     center_lat = df['original_lat'].mean()
     center_lon = df['original_lon'].mean()
     
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=18, tiles='OpenStreetMap')
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=18, tiles='CartoDB positron')
     
     fg_orig = folium.FeatureGroup(name="Original Overture", show=True)
     fg_pred = folium.FeatureGroup(name="ML Predicted", show=True)
@@ -72,21 +72,11 @@ def generate_pipeline_map(df, output_path):
                     icon=folium.Icon(color='green', icon='check'),
                     popup=f"Aligned ML:<br>{popup_html}"
                 ).add_to(fg_align)
-                
-                folium.PolyLine(
-                    locations=[[orig_lat, orig_lon], [align_lat, align_lon]],
-                    color='green', weight=3, opacity=0.8
-                ).add_to(fg_align)
             else:
                 folium.Marker(
                     location=[pred_lat, pred_lon],
                     icon=folium.Icon(color='blue', icon='star'),
                     popup=f"Predicted ML:<br>{popup_html}"
-                ).add_to(fg_pred)
-                
-                folium.PolyLine(
-                    locations=[[orig_lat, orig_lon], [pred_lat, pred_lon]],
-                    color='blue', weight=2, dash_array='5', opacity=0.6
                 ).add_to(fg_pred)
 
     fg_orig.add_to(m)

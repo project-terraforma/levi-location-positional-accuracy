@@ -8,7 +8,6 @@ import numpy as np
 # Configuration
 DATA_DIR = Path("data")
 GROUND_TRUTH_CSV = DATA_DIR / "ground_truth.csv"
-ORIGINAL_CSV = DATA_DIR / "ground_truth_pending.csv"
 OUTPUT_MAP = DATA_DIR / "offset_analysis_map.html"
 
 def calculate_distance(lat1, lon1, lat2, lon2):
@@ -35,11 +34,6 @@ def main():
     print(f"\nLoading ground truth data from {GROUND_TRUTH_CSV}...")
     gt_df = pd.read_csv(GROUND_TRUTH_CSV)
     print(f"✓ Loaded {len(gt_df)} ground truth locations")
-    
-    # Load original data (Overture Places data)
-    print(f"\nLoading original data from {ORIGINAL_CSV}...")
-    orig_df = pd.read_csv(ORIGINAL_CSV)
-    print(f"✓ Loaded {len(orig_df)} original locations")
     
     # Parse coordinates from WKT in ground truth
     def parse_wkt(wkt):
@@ -125,7 +119,7 @@ def main():
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=12,
-        tiles='OpenStreetMap'
+        tiles='CartoDB positron'
     )
     
     # Add each location
@@ -136,7 +130,7 @@ def main():
         # Add original point (red)
         folium.CircleMarker(
             location=[row['orig_lat'], row['orig_lon']],
-            radius=6,
+            radius=3,
             popup=folium.Popup(
                 f"<b>Original (Overture)</b><br>"
                 f"{row['Name']}<br>"
@@ -144,17 +138,17 @@ def main():
                 f"Offset: {row['offset_distance_m']:.2f}m",
                 max_width=300
             ),
-            color='red',
+            color='#e53935',
             fill=True,
-            fillColor='red',
+            fillColor='#e53935',
             fillOpacity=0.7,
-            weight=2
+            weight=1
         ).add_to(fg)
         
-        # Add ground truth point (green)
+        # Add ground truth point (blue)
         folium.CircleMarker(
             location=[row['gt_lat'], row['gt_lon']],
-            radius=6,
+            radius=3,
             popup=folium.Popup(
                 f"<b>Ground Truth (Corrected)</b><br>"
                 f"{row['Name']}<br>"
@@ -162,11 +156,11 @@ def main():
                 f"Offset: {row['offset_distance_m']:.2f}m",
                 max_width=300
             ),
-            color='green',
+            color='#1e88e5',
             fill=True,
-            fillColor='green',
+            fillColor='#1e88e5',
             fillOpacity=0.7,
-            weight=2
+            weight=1
         ).add_to(fg)
         
         # Draw line connecting them
@@ -175,8 +169,8 @@ def main():
                 [row['orig_lat'], row['orig_lon']],
                 [row['gt_lat'], row['gt_lon']]
             ],
-            color='blue',
-            weight=2,
+            color='#9e9e9e',
+            weight=1.5,
             opacity=0.6,
             popup=f"Offset: {row['offset_distance_m']:.2f}m"
         ).add_to(fg)
@@ -188,20 +182,34 @@ def main():
     
     # Add legend
     legend_html = f'''
-    <div style="position: fixed; bottom: 50px; left: 50px; width: 250px; height: auto; 
-         background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px">
-         <p style="margin:0; font-weight:bold;">Data Offset Analysis</p>
-         <hr style="margin:5px 0;">
-         <p style="margin:2px;"><span style="color:red;">●</span> Original (Overture)</p>
-         <p style="margin:2px;"><span style="color:green;">●</span> Ground Truth (Corrected)</p>
-         <p style="margin:2px;"><span style="color:blue;">━</span> Offset Line</p>
-         <hr style="margin:5px 0;">
-         <p style="margin:2px; font-size:11px;"><b>Statistics:</b></p>
-         <p style="margin:2px; font-size:10px;">Mean offset: {np.mean(valid_distances):.2f}m</p>
-         <p style="margin:2px; font-size:10px;">Median offset: {np.median(valid_distances):.2f}m</p>
-         <p style="margin:2px; font-size:10px;">Max offset: {np.max(valid_distances):.2f}m</p>
-         <hr style="margin:5px 0;">
-         <p style="margin:2px; font-size:10px;">Toggle layers to view individual locations</p>
+    <div style="position: fixed; bottom: 20px; left: 20px; width: 250px; 
+         background: white; border: 2px solid #666; z-index: 9999;
+         font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+         font-size: 12px; padding: 14px; border-radius: 8px;
+         box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+         <h3 style="margin:0 0 8px 0; font-size:14px; color:#333;">Data Offset Analysis</h3>
+         <p style="margin:2px;"><span style="color:#e53935;">●</span> Original (Overture)</p>
+         <p style="margin:2px;"><span style="color:#1e88e5;">●</span> Ground Truth (Corrected)</p>
+         <p style="margin:2px;"><span style="color:#9e9e9e;">━</span> Offset Line</p>
+         <hr style="margin:8px 0; border:0; border-top:1px solid #ddd;">
+         <p style="margin:2px 0 4px 0; font-size:11px; font-weight:bold; color:#666;">Statistics:</p>
+         <table style="width: 100%; font-size: 11px; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 2px 0;">Mean offset</td>
+                <td style="text-align: right; font-weight: bold;">{np.mean(valid_distances):.1f}m</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 2px 0;">Median offset</td>
+                <td style="text-align: right; font-weight: bold;">{np.median(valid_distances):.1f}m</td>
+            </tr>
+            <tr>
+                <td style="padding: 2px 0;">Max offset</td>
+                <td style="text-align: right; font-weight: bold;">{np.max(valid_distances):.1f}m</td>
+            </tr>
+         </table>
+         <div style="margin-top: 8px; font-size: 10px; color: #999;">
+            Toggle layers top right to isolate points
+         </div>
     </div>
     '''
     m.get_root().html.add_child(folium.Element(legend_html))
